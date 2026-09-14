@@ -321,9 +321,10 @@ Points reached: {points}. Branch outcomes taken: {branches}."#,
         .with_context(|| format!("error reading {}", file.path))?;
     writeln!(
         out,
-        "\nEach line shows its number, the count the coverage reports for it, and the source.\n\
-         A line holding several points, or a decision, names them below itself at their columns.\n\
-         A line with a point no run reached is marked."
+        "\nEach line shows its number, how often the points on it were reached, and the source.\n\
+         A line holding several points, or a decision, lists them below itself as `what (line:column): count`.\n\
+         A decision's two outcomes stay together, `[true: 2, false: 2]`, and count towards the branches rather than the line.\n\
+         A line with a point no run reached is marked red."
     )?;
     write_source(&mut out, file, &source)?;
     Ok(())
