@@ -322,7 +322,7 @@ Points reached: {points}. Branch outcomes taken: {branches}."#,
     writeln!(
         out,
         "\nEach line shows its number, how often the points on it were reached, and the source.\n\
-         A line holding several points, or a decision, lists them below itself as `what (line:column): count`.\n\
+         Where a line holds several points, or a decision, the points follow it between rules, one per line, as `what (line:column): count`.\n\
          A decision's two outcomes stay together, `[true: 2, false: 2]`, and count towards the branches rather than the line.\n\
          A line with a point no run reached is marked red."
     )?;
@@ -334,43 +334,37 @@ Points reached: {points}. Branch outcomes taken: {branches}."#,
 /// the line's count, then the line, and the lines holding a point no run
 /// reached marked. A line whose count doesn't account for what is on it --
 /// several points, or a decision, whose outcomes count towards the branches
-/// and not towards the line -- carries a note naming each point.
+/// and not towards the line -- is followed by a note naming each point.
 fn write_source(out: &mut impl Write, file: &FileCoverage, source: &str) -> std::io::Result<()> {
     let lines: Vec<&str> = source.lines().collect();
-    let rendered: Vec<(String, Option<String>)> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let entries = file.lines.get(&(i + 1));
-            (line_count(entries), note(entries, i + 1, text))
-        })
-        .collect();
+    let counted: Vec<String> =
+        (1..=lines.len()).map(|line| line_count(file.lines.get(&line))).collect();
 
     // Right-aligned like any coverage report, each column wide enough for
     // the largest number in it.
     let numbers = lines.len().to_string().len().max(4);
-    let counts = rendered.iter().map(|(count, _)| count.len()).max().unwrap_or(0).max(5);
+    let counts = counted.iter().map(String::len).max().unwrap_or(0).max(5);
 
-    // The marked lines are numbered within the block, which the notes shift.
-    let mut marked = Vec::new();
-    let mut in_block = 0;
-    for (i, (_, note)) in rendered.iter().enumerate() {
-        in_block += 1;
-        if unreached(file.lines.get(&(i + 1))) {
-            marked.push(in_block.to_string());
+    // Built first so that a line holding a point no run reached is marked by
+    // its position in the block, which the notes between the source lines
+    // shift.
+    let mut block: Vec<String> = Vec::new();
+    let mut marked: Vec<String> = Vec::new();
+    for (i, (text, count)) in lines.iter().zip(&counted).enumerate() {
+        let entries = file.lines.get(&(i + 1));
+        block.push(format!("{:>numbers$}|{count:>counts$}|{text}", i + 1));
+        if unreached(entries) {
+            marked.push(block.len().to_string());
         }
-        in_block += usize::from(note.is_some());
+        block.extend(note(entries, i + 1));
     }
     let mark =
         if marked.is_empty() { String::new() } else { format!(" del={{{}}}", marked.join(",")) };
 
     let fence = fence(source);
     writeln!(out, "\n{fence}text{mark}")?;
-    for (i, (text, (count, note))) in lines.iter().zip(&rendered).enumerate() {
-        writeln!(out, "{:>numbers$}|{count:>counts$}|{text}", i + 1)?;
-        if let Some(note) = note {
-            writeln!(out, "{:>numbers$}|{:>counts$}|{note}", "", "")?;
-        }
+    for line in &block {
+        writeln!(out, "{line}")?;
     }
     writeln!(out, "{fence}")
 }
@@ -392,18 +386,22 @@ fn line_count(entries: Option<&Vec<Entry>>) -> String {
     points.iter().flat_map(|e| e.items()).map(|(_, count)| count).sum::<u64>().to_string()
 }
 
-/// What sits on a line, when its count doesn't say: each point at its
-/// location, `binding both (12:31): 4, branch && (12:35): [true: 2, false:
-/// 2]`, indented under the code.
-fn note(entries: Option<&Vec<Entry>>, line: usize, text: &str) -> Option<String> {
-    let entries = entries?;
+/// What sits on a line, when its count doesn't say: one point per line,
+/// `binding both (12:31): 4`, set off by rules and out of the source's
+/// columns, the way `llvm-cov` states the branches of a line. Without that
+/// the note reads as more `.slint` code, which is what it describes.
+fn note(entries: Option<&Vec<Entry>>, line: usize) -> Vec<String> {
+    /// The rule `llvm-cov` brackets the notes of a line with.
+    const RULE: &str = "  ------------------";
+    let Some(entries) = entries else { return Vec::new() };
     let decides = |e: &Entry| matches!(e, Entry::Decision { .. });
     if entries.len() < 2 && !entries.iter().any(decides) {
-        return None;
+        return Vec::new();
     }
-    let indent = &text[..text.len() - text.trim_start().len()];
-    let named: Vec<String> = entries.iter().map(|entry| described(entry, line)).collect();
-    Some(format!("{indent}{}", named.join(", ")))
+    let mut note = vec![RULE.to_string()];
+    note.extend(entries.iter().map(|entry| format!("  |  {}", described(entry, line))));
+    note.push(RULE.to_string());
+    note
 }
 
 /// One point of a note. A decision keeps its outcomes together, the way
@@ -503,16 +501,19 @@ mod tests {
         // A decision's outcomes count towards the branches, so the line's
         // count is its binding's alone and a note attributes the rest.
         assert_eq!(line(1), "   2|    3|    property <int> p: c ? 1 : 2;");
-        assert_eq!(
-            line(2),
-            "    |     |    binding p (2:23): 3, branch ? (2:25): [true: 3, false: 0]"
-        );
+        // The points follow the line between rules, out of the source's
+        // columns, so the note can't be read as more Slint code.
+        assert_eq!(line(2), "  ------------------");
+        assert_eq!(line(3), "  |  binding p (2:23): 3");
+        assert_eq!(line(4), "  |  branch ? (2:25): [true: 3, false: 0]");
+        assert_eq!(line(5), "  ------------------");
         // A line with no point has no count, like any coverage report.
-        assert_eq!(line(3), "   3|     |    x: 1px;");
+        assert_eq!(line(6), "   3|     |    x: 1px;");
         // One point that isn't a decision needs no note: the count is its own.
         assert!(!out.contains("element Window ("), "{out}");
         // The line whose decision never took an outcome is marked, numbered
-        // within the block, where the note of line 2 shifts what follows.
+        // within the block, which the note of line 2 doesn't shift because
+        // it follows it.
         assert!(out.starts_with("\n```text del={2}\n"), "{out}");
     }
 
